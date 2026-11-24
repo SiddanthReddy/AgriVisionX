@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -7,13 +7,15 @@ from torchvision import transforms
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import io
 import cv2
 import numpy as np
 import uuid
+from torchvision import models as tv_models
 
-from gradcam_utils import generate_heatmap
-from models.hybrid_model import HybridCNNTransformer
+from backend.gradcam_utils import generate_heatmap
+from backend.models.hybrid_model import HybridCNNTransformer
 
 app = FastAPI(title="Leaf Disease Detection API")
 
@@ -93,6 +95,38 @@ model.load_state_dict(
 model.to(DEVICE)
 model.eval()
 
+# -------------------------------------------------------------------------
+# Leaf‑validator preprocessing (separate, includes ImageNet normalization)
+# -------------------------------------------------------------------------
+leaf_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
+
+# -------------------------------------------------------------------------
+# Load leaf‑validator (binary) model – no pretrained weights
+# -------------------------------------------------------------------------
+leaf_model = tv_models.mobilenet_v3_small(weights=None)
+in_features = leaf_model.classifier[3].in_features
+leaf_model.classifier[3] = torch.nn.Linear(in_features, 2)
+
+leaf_ckpt_path = (
+    Path(__file__).parent.parent
+    / "model"
+    / "leaf_validator.pth"
+)
+leaf_ckpt = torch.load(str(leaf_ckpt_path), map_location=DEVICE)
+leaf_model.load_state_dict(leaf_ckpt["model_state_dict"])
+leaf_model.to(DEVICE)
+leaf_model.eval()
+
+# Use the saved threshold; fallback to 0.93
+LEAF_THRESHOLD = leaf_ckpt.get("threshold", 0.93)
+
 # Image transform
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -115,11 +149,18 @@ async def predict(file: UploadFile = File(...)):
         io.BytesIO(image_bytes)
     ).convert("RGB")
 
-    x = transform(image).unsqueeze(0).to(DEVICE)
+    # Leaf validation
+    leaf_x = leaf_transform(image).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        leaf_out = leaf_model(leaf_x)
+        leaf_prob = F.softmax(leaf_out, dim=1)[0, 1]
+    if leaf_prob < LEAF_THRESHOLD:
+        raise HTTPException(status_code=400, detail="Uploaded image does not contain a leaf. Please upload a valid leaf image.")
 
+    # Disease model inference
+    x = transform(image).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
         output = model(x)
-
     confidence, pred = torch.max(
         output,
         dim=1
@@ -145,7 +186,7 @@ async def predict(file: UploadFile = File(...)):
     filename = f"{uuid.uuid4().hex}.jpg"
 
     heatmap_path = (
-        Path(__file__).parent
+        Path(__file__).parent.parent
         / "heatmaps"
         / filename
     )

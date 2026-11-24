@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 .venv/
 venv/
 __pycache__/
@@ -35,3 +35,14 @@ Thumbs.db
 # Temporary files
 *.log
 *.tmp
+
+# Validator dataset and downloads
+validator_dataset/
+downloads/
+
+# Generated heatmaps
+heatmaps/
+
+# Backup files
+model/leaf_validator.pth.bak
+model/validator_training_report.json.bak
